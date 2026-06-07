@@ -335,3 +335,160 @@ class TestCcBcc:
         )
         assert result.ok is True
         fake_api_client.send.assert_called_once()
+
+
+class TestRetryConfig:
+    def test_default_no_retries(self) -> None:
+        sg = SendGridClient(api_key="SG.test")
+        assert sg._max_retries == 0
+        assert sg._retry_delay == 1.0
+
+    def test_custom_retry_config(self) -> None:
+        sg = SendGridClient(api_key="SG.test", max_retries=3, retry_delay=0.5)
+        assert sg._max_retries == 3
+        assert sg._retry_delay == 0.5
+
+    def test_from_env_with_retry_config(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test"}):
+            sg = SendGridClient.from_env(max_retries=2, retry_delay=2.0)
+            assert sg._max_retries == 2
+            assert sg._retry_delay == 2.0
+
+
+class TestRetryBehavior:
+    @pytest.fixture
+    def retry_client(self, fake_api_client: MagicMock) -> SendGridClient:
+        """Return a client with retries enabled and backoff patched out."""
+        sg = SendGridClient(api_key="SG.fake", default_from="sender@example.com", max_retries=3, retry_delay=0.1)
+        sg._client = fake_api_client
+        return sg
+
+    def test_no_retry_on_success(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        fake_api_client.send.return_value = FakeResponse(status_code=202)
+        with patch.object(retry_client, "_backoff") as mock_backoff:
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is True
+        assert result.status_code == 202
+        fake_api_client.send.assert_called_once()
+        mock_backoff.assert_not_called()
+
+    def test_no_retry_on_client_error(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        """4xx errors (except 429) should NOT be retried."""
+        fake_api_client.send.return_value = FakeResponse(status_code=400, body=b"Bad Request")
+        with patch.object(retry_client, "_backoff") as mock_backoff:
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        assert result.status_code == 400
+        fake_api_client.send.assert_called_once()
+        mock_backoff.assert_not_called()
+
+    @pytest.mark.parametrize("status_code", [429, 500, 502, 503, 504])
+    def test_retry_on_transient_status(
+        self, retry_client: SendGridClient, fake_api_client: MagicMock, status_code: int
+    ) -> None:
+        """Each retryable status code should trigger retries."""
+        fake_api_client.send.return_value = FakeResponse(status_code=status_code)
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        assert result.status_code == status_code
+        # 1 initial + 3 retries = 4 total calls
+        assert fake_api_client.send.call_count == 4
+
+    def test_successful_retry_after_transient_failure(
+        self, retry_client: SendGridClient, fake_api_client: MagicMock
+    ) -> None:
+        """Should succeed if a transient failure is followed by a success."""
+        fake_api_client.send.side_effect = [
+            FakeResponse(status_code=503),
+            FakeResponse(status_code=503),
+            FakeResponse(status_code=202),
+        ]
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is True
+        assert result.status_code == 202
+        assert fake_api_client.send.call_count == 3
+
+    def test_max_retries_exhausted(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        """Should return the last failed result when all retries are exhausted."""
+        fake_api_client.send.return_value = FakeResponse(status_code=500, body=b"Internal Server Error")
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        assert result.status_code == 500
+        assert fake_api_client.send.call_count == 4
+
+    def test_retry_on_exception(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        """Network exceptions should also be retried."""
+        fake_api_client.send.side_effect = [
+            ConnectionError("network down"),
+            FakeResponse(status_code=202),
+        ]
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is True
+        assert result.status_code == 202
+        assert fake_api_client.send.call_count == 2
+
+    def test_exception_retries_exhausted(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        """Should return error result when exceptions exhaust all retries."""
+        fake_api_client.send.side_effect = ConnectionError("network down")
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        assert result.error == "network down"
+        assert fake_api_client.send.call_count == 4
+
+    def test_zero_retries_no_retry(self, fake_api_client: MagicMock) -> None:
+        """With max_retries=0 (default), transient errors are not retried."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com")
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=500)
+        result = sg.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        fake_api_client.send.assert_called_once()
+
+    def test_retry_works_with_send_html(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        fake_api_client.send.side_effect = [
+            FakeResponse(status_code=429),
+            FakeResponse(status_code=202),
+        ]
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_html(to="user@example.com", subject="Hi", html="<p>Hi</p>")
+        assert result.ok is True
+        assert fake_api_client.send.call_count == 2
+
+    def test_retry_works_with_send_template(self, retry_client: SendGridClient, fake_api_client: MagicMock) -> None:
+        fake_api_client.send.side_effect = [
+            FakeResponse(status_code=502),
+            FakeResponse(status_code=202),
+        ]
+        with patch.object(retry_client, "_backoff"):
+            result = retry_client.send_template(
+                to="user@example.com", template_id="d-abc123", dynamic_data={"name": "Test"}
+            )
+        assert result.ok is True
+        assert fake_api_client.send.call_count == 2
+
+
+class TestBackoff:
+    def test_backoff_calls_sleep(self) -> None:
+        sg = SendGridClient(api_key="SG.test", retry_delay=1.0)
+        with (
+            patch("altissimo.sendgrid.client.time.sleep") as mock_sleep,
+            patch("altissimo.sendgrid.client.random.uniform", return_value=0.25),
+        ):
+            sg._backoff(0)
+        # delay = 1.0 * 2^0 = 1.0, jitter = 0.25 → total = 1.25
+        mock_sleep.assert_called_once_with(1.25)
+
+    def test_backoff_exponential(self) -> None:
+        sg = SendGridClient(api_key="SG.test", retry_delay=1.0)
+        with (
+            patch("altissimo.sendgrid.client.time.sleep") as mock_sleep,
+            patch("altissimo.sendgrid.client.random.uniform", return_value=0.0),
+        ):
+            sg._backoff(2)
+        # delay = 1.0 * 2^2 = 4.0, jitter = 0.0 → total = 4.0
+        mock_sleep.assert_called_once_with(4.0)

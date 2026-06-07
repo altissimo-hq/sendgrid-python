@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import time
 from typing import TYPE_CHECKING, Any
 
 from altissimo.sendgrid.exceptions import SendGridImportError
@@ -16,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 #: Type alias for recipient arguments — a single email or a list of emails.
 EmailRecipients = str | list[str]
+
+#: HTTP status codes that are considered transient and eligible for retry.
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 __all__ = ["SendGridClient"]
 
@@ -47,11 +52,24 @@ class SendGridClient:
         api_key: SendGrid API key.
         default_from: Default sender email address. Used when ``from_email``
             is not provided to individual send methods.
+        max_retries: Maximum number of retry attempts for transient errors.
+            Set to ``0`` (default) to disable retries.
+        retry_delay: Base delay in seconds between retries. Actual delay
+            uses exponential backoff with jitter.
     """
 
-    def __init__(self, api_key: str, default_from: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        default_from: str | None = None,
+        *,
+        max_retries: int = 0,
+        retry_delay: float = 1.0,
+    ) -> None:
         self._api_key = api_key
         self._default_from = default_from
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
         self._client: SendGridAPIClient | None = None
 
     @classmethod
@@ -60,12 +78,16 @@ class SendGridClient:
         *,
         env_var: str = "SENDGRID_API_KEY",
         default_from: str | None = None,
+        max_retries: int = 0,
+        retry_delay: float = 1.0,
     ) -> SendGridClient:
         """Create a client using an API key from an environment variable.
 
         Args:
             env_var: Name of the environment variable containing the API key.
             default_from: Default sender email address.
+            max_retries: Maximum number of retry attempts for transient errors.
+            retry_delay: Base delay in seconds between retries.
 
         Raises:
             ValueError: If the environment variable is not set.
@@ -74,7 +96,7 @@ class SendGridClient:
         if not api_key:
             msg = f"Environment variable '{env_var}' is not set or is empty."
             raise ValueError(msg)
-        return cls(api_key=api_key, default_from=default_from)
+        return cls(api_key=api_key, default_from=default_from, max_retries=max_retries, retry_delay=retry_delay)
 
     @property
     def client(self) -> SendGridAPIClient:
@@ -153,6 +175,50 @@ class SendGridClient:
             error=str(exc),
         )
 
+    def _send_with_retry(self, message: Any) -> SendResult:
+        """Send a message, retrying on transient failures with exponential backoff.
+
+        Retries are only attempted when ``max_retries > 0`` and the response
+        status code is in ``_RETRYABLE_STATUS_CODES``.
+        """
+        last_result: SendResult | None = None
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self.client.send(message)
+            except Exception as exc:
+                last_result = self._build_error_result(exc)
+                # Exceptions (network errors, etc.) are also retryable
+                if attempt < self._max_retries:
+                    self._backoff(attempt)
+                    continue
+                return last_result
+
+            result = self._build_result(response)
+
+            if result.ok or result.status_code not in _RETRYABLE_STATUS_CODES:
+                return result
+
+            # Transient failure — retry if we have attempts left
+            last_result = result
+            if attempt < self._max_retries:
+                logger.warning(
+                    "SendGrid returned %d, retrying (attempt %d/%d)",
+                    result.status_code,
+                    attempt + 1,
+                    self._max_retries,
+                )
+                self._backoff(attempt)
+
+        # All retries exhausted — return the last result
+        return last_result  # type: ignore[return-value]
+
+    def _backoff(self, attempt: int) -> None:
+        """Sleep with exponential backoff and jitter."""
+        delay = self._retry_delay * (2**attempt)
+        jitter = random.uniform(0, delay * 0.5)  # noqa: S311
+        time.sleep(delay + jitter)
+
     def send_text(
         self,
         *,
@@ -198,12 +264,7 @@ class SendGridClient:
 
             message.reply_to = ReplyTo(reply_to)
 
-        try:
-            response = self.client.send(message)
-        except Exception as exc:
-            return self._build_error_result(exc)
-
-        return self._build_result(response)
+        return self._send_with_retry(message)
 
     def send_html(
         self,
@@ -250,12 +311,7 @@ class SendGridClient:
 
             message.reply_to = ReplyTo(reply_to)
 
-        try:
-            response = self.client.send(message)
-        except Exception as exc:
-            return self._build_error_result(exc)
-
-        return self._build_result(response)
+        return self._send_with_retry(message)
 
     def send_template(
         self,
@@ -303,9 +359,4 @@ class SendGridClient:
 
             message.reply_to = ReplyTo(reply_to)
 
-        try:
-            response = self.client.send(message)
-        except Exception as exc:
-            return self._build_error_result(exc)
-
-        return self._build_result(response)
+        return self._send_with_retry(message)
