@@ -1,0 +1,89 @@
+[project]
+name = "altissimo-sendgrid"
+version = "0.1.0"
+description = "Reusable SendGrid email client for Altissimo projects"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [
+    { name = "Altissimo HQ" },
+]
+keywords = ["sendgrid", "email", "altissimo"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+sendgrid = ["sendgrid>=6.0,<7.0"]
+
+[project.urls]
+Homepage = "https://github.com/altissimo-hq/sendgrid-python"
+Repository = "https://github.com/altissimo-hq/sendgrid-python"
+Issues = "https://github.com/altissimo-hq/sendgrid-python/issues"
+Changelog = "https://github.com/altissimo-hq/sendgrid-python/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "altissimo-sendgrid"
+packages = [
+    { include = "altissimo", from = "src" },
+]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-cov = ">=6.0"
+ruff = ">=0.11"
+pre-commit = ">=4.0"
+
+# Include sendgrid in dev for testing
+sendgrid = ">=6.0,<7.0"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "SIM",  # flake8-simplify
+    "PT",   # flake8-pytest-style
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["altissimo"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -v"
+
+[tool.coverage.run]
+source = ["altissimo"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
