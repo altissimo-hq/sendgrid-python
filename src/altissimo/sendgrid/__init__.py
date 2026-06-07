@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from .client import SendGridClient
+from .client import EmailRecipients, SendGridClient
 from .exceptions import SendGridError, SendGridImportError
 from .models import SendResult
 
@@ -14,6 +14,7 @@ except PackageNotFoundError:
     __version__ = "0.1.0"
 
 __all__ = [
+    "EmailRecipients",
     "SendGridClient",
     "SendGridError",
     "SendGridImportError",

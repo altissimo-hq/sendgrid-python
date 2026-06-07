@@ -217,3 +217,121 @@ class TestSendGridImportError:
             sg = SendGridClient(api_key="SG.test")
             with pytest.raises(SendGridImportError):
                 _ = sg.client
+
+
+class TestNormalizeRecipients:
+    def test_single_string(self) -> None:
+        assert SendGridClient._normalize_recipients("a@example.com") == ["a@example.com"]
+
+    def test_list_of_strings(self) -> None:
+        result = SendGridClient._normalize_recipients(["a@example.com", "b@example.com"])
+        assert result == ["a@example.com", "b@example.com"]
+
+    def test_single_item_list(self) -> None:
+        assert SendGridClient._normalize_recipients(["a@example.com"]) == ["a@example.com"]
+
+
+class TestMultipleRecipients:
+    def test_send_text_multiple_to(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to=["a@example.com", "b@example.com"],
+            subject="Hello",
+            body="Hi",
+        )
+        assert result.ok is True
+        fake_api_client.send.assert_called_once()
+
+    def test_send_html_multiple_to(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_html(
+            to=["a@example.com", "b@example.com"],
+            subject="Hello",
+            html="<h1>Hi</h1>",
+        )
+        assert result.ok is True
+        fake_api_client.send.assert_called_once()
+
+    def test_send_template_multiple_to(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_template(
+            to=["a@example.com", "b@example.com"],
+            template_id="d-abc123",
+            dynamic_data={"name": "Test"},
+        )
+        assert result.ok is True
+        fake_api_client.send.assert_called_once()
+
+    def test_single_string_still_works(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        """Backward compatibility — single string `to` must still work."""
+        result = client_with_mock.send_text(to="user@example.com", subject="Hello", body="Hi")
+        assert result.ok is True
+
+
+class TestCcBcc:
+    def test_send_text_with_cc(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hello",
+            body="Hi",
+            cc="cc@example.com",
+        )
+        assert result.ok is True
+        fake_api_client.send.assert_called_once()
+
+    def test_send_text_with_bcc(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hello",
+            body="Hi",
+            bcc="bcc@example.com",
+        )
+        assert result.ok is True
+
+    def test_send_text_with_cc_list(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hello",
+            body="Hi",
+            cc=["cc1@example.com", "cc2@example.com"],
+        )
+        assert result.ok is True
+
+    def test_send_text_with_bcc_list(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hello",
+            body="Hi",
+            bcc=["bcc1@example.com", "bcc2@example.com"],
+        )
+        assert result.ok is True
+
+    def test_send_html_with_cc_and_bcc(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_html(
+            to="user@example.com",
+            subject="Hello",
+            html="<p>Hi</p>",
+            cc="cc@example.com",
+            bcc=["bcc1@example.com", "bcc2@example.com"],
+        )
+        assert result.ok is True
+
+    def test_send_template_with_cc_and_bcc(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_template(
+            to="user@example.com",
+            template_id="d-abc123",
+            dynamic_data={"name": "Test"},
+            cc=["cc@example.com"],
+            bcc="bcc@example.com",
+        )
+        assert result.ok is True
+
+    def test_send_with_all_recipient_types(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        """Multiple to, CC, BCC, and reply_to all together."""
+        result = client_with_mock.send_html(
+            to=["a@example.com", "b@example.com"],
+            subject="Hello",
+            html="<p>Hi</p>",
+            cc=["cc1@example.com", "cc2@example.com"],
+            bcc=["bcc@example.com"],
+            reply_to="support@example.com",
+        )
+        assert result.ok is True
+        fake_api_client.send.assert_called_once()

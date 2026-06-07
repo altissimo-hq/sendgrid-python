@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Type alias for recipient arguments — a single email or a list of emails.
+EmailRecipients = str | list[str]
+
 __all__ = ["SendGridClient"]
 
 
@@ -92,6 +95,42 @@ class SendGridClient:
             raise ValueError(msg)
         return resolved
 
+    @staticmethod
+    def _normalize_recipients(recipients: EmailRecipients) -> list[str]:
+        """Normalize a recipient argument to a list of email strings."""
+        if isinstance(recipients, str):
+            return [recipients]
+        return list(recipients)
+
+    @staticmethod
+    def _apply_cc_bcc(
+        message: Any,
+        cc: EmailRecipients | None,
+        bcc: EmailRecipients | None,
+    ) -> None:
+        """Add CC and BCC recipients to the first personalization."""
+        if not cc and not bcc:
+            return
+
+        try:
+            from sendgrid.helpers.mail import Bcc, Cc
+        except ImportError:
+            raise SendGridImportError from None
+
+        # SendGrid Mail objects store a list of Personalization objects;
+        # we add CC/BCC to the first one (the primary personalization).
+        personalization = message.personalizations[0]
+
+        if cc:
+            cc_list = [cc] if isinstance(cc, str) else cc
+            for addr in cc_list:
+                personalization.add_cc(Cc(addr))
+
+        if bcc:
+            bcc_list = [bcc] if isinstance(bcc, str) else bcc
+            for addr in bcc_list:
+                personalization.add_bcc(Bcc(addr))
+
     def _build_result(self, response: Any) -> SendResult:
         """Convert a SendGrid API response to a ``SendResult``."""
         status_code = response.status_code
@@ -117,20 +156,24 @@ class SendGridClient:
     def send_text(
         self,
         *,
-        to: str,
+        to: EmailRecipients,
         subject: str,
         body: str,
         from_email: str | None = None,
         reply_to: str | None = None,
+        cc: EmailRecipients | None = None,
+        bcc: EmailRecipients | None = None,
     ) -> SendResult:
         """Send a plain-text email.
 
         Args:
-            to: Recipient email address.
+            to: Recipient email address or list of addresses.
             subject: Email subject line.
             body: Plain-text email body.
             from_email: Sender email address (overrides ``default_from``).
             reply_to: Reply-to email address.
+            cc: CC recipient(s) — a single email or list of emails.
+            bcc: BCC recipient(s) — a single email or list of emails.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -143,10 +186,12 @@ class SendGridClient:
         sender = self._resolve_from(from_email)
         message = Mail(
             from_email=sender,
-            to_emails=to,
+            to_emails=self._normalize_recipients(to),
             subject=subject,
             plain_text_content=body,
         )
+
+        self._apply_cc_bcc(message, cc, bcc)
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
@@ -163,20 +208,24 @@ class SendGridClient:
     def send_html(
         self,
         *,
-        to: str,
+        to: EmailRecipients,
         subject: str,
         html: str,
         from_email: str | None = None,
         reply_to: str | None = None,
+        cc: EmailRecipients | None = None,
+        bcc: EmailRecipients | None = None,
     ) -> SendResult:
         """Send an HTML email.
 
         Args:
-            to: Recipient email address.
+            to: Recipient email address or list of addresses.
             subject: Email subject line.
             html: HTML email body.
             from_email: Sender email address (overrides ``default_from``).
             reply_to: Reply-to email address.
+            cc: CC recipient(s) — a single email or list of emails.
+            bcc: BCC recipient(s) — a single email or list of emails.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -189,10 +238,12 @@ class SendGridClient:
         sender = self._resolve_from(from_email)
         message = Mail(
             from_email=sender,
-            to_emails=to,
+            to_emails=self._normalize_recipients(to),
             subject=subject,
             html_content=html,
         )
+
+        self._apply_cc_bcc(message, cc, bcc)
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
@@ -209,20 +260,24 @@ class SendGridClient:
     def send_template(
         self,
         *,
-        to: str,
+        to: EmailRecipients,
         template_id: str,
         dynamic_data: dict[str, Any] | None = None,
         from_email: str | None = None,
         reply_to: str | None = None,
+        cc: EmailRecipients | None = None,
+        bcc: EmailRecipients | None = None,
     ) -> SendResult:
         """Send a dynamic template email.
 
         Args:
-            to: Recipient email address.
+            to: Recipient email address or list of addresses.
             template_id: SendGrid dynamic template ID (e.g. ``d-abc123``).
             dynamic_data: Template variable substitutions.
             from_email: Sender email address (overrides ``default_from``).
             reply_to: Reply-to email address.
+            cc: CC recipient(s) — a single email or list of emails.
+            bcc: BCC recipient(s) — a single email or list of emails.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -233,14 +288,15 @@ class SendGridClient:
             raise SendGridImportError from None
 
         sender = self._resolve_from(from_email)
+        recipients = self._normalize_recipients(to)
+        to_emails = [To(email=addr, dynamic_template_data=dynamic_data or {}) for addr in recipients]
         message = Mail(
             from_email=sender,
-            to_emails=To(
-                email=to,
-                dynamic_template_data=dynamic_data or {},
-            ),
+            to_emails=to_emails,
         )
         message.template_id = template_id
+
+        self._apply_cc_bcc(message, cc, bcc)
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
