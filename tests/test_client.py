@@ -492,3 +492,127 @@ class TestBackoff:
             sg._backoff(2)
         # delay = 1.0 * 2^2 = 4.0, jitter = 0.0 → total = 4.0
         mock_sleep.assert_called_once_with(4.0)
+
+
+class TestSandboxConfig:
+    def test_default_no_sandbox(self) -> None:
+        sg = SendGridClient(api_key="SG.test")
+        assert sg._sandbox_mode is False
+
+    def test_sandbox_enabled(self) -> None:
+        sg = SendGridClient(api_key="SG.test", sandbox_mode=True)
+        assert sg._sandbox_mode is True
+
+    def test_from_env_sandbox_explicit_true(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test"}):
+            sg = SendGridClient.from_env(sandbox_mode=True)
+            assert sg._sandbox_mode is True
+
+    def test_from_env_sandbox_explicit_false(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test", "SENDGRID_SANDBOX_MODE": "true"}):
+            sg = SendGridClient.from_env(sandbox_mode=False)
+            assert sg._sandbox_mode is False
+
+    @pytest.mark.parametrize("env_value", ["1", "true", "True", "TRUE", "yes", "Yes", "YES"])
+    def test_from_env_sandbox_from_env_var_truthy(self, env_value: str) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test", "SENDGRID_SANDBOX_MODE": env_value}):
+            sg = SendGridClient.from_env()
+            assert sg._sandbox_mode is True
+
+    @pytest.mark.parametrize("env_value", ["0", "false", "no", "", "anything"])
+    def test_from_env_sandbox_from_env_var_falsy(self, env_value: str) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test", "SENDGRID_SANDBOX_MODE": env_value}):
+            sg = SendGridClient.from_env()
+            assert sg._sandbox_mode is False
+
+    def test_from_env_sandbox_missing_env_var(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test"}, clear=True):
+            sg = SendGridClient.from_env()
+            assert sg._sandbox_mode is False
+
+
+class TestResolveSandbox:
+    def test_per_call_true_overrides_client_false(self) -> None:
+        sg = SendGridClient(api_key="SG.test", sandbox_mode=False)
+        assert sg._resolve_sandbox(True) is True
+
+    def test_per_call_false_overrides_client_true(self) -> None:
+        sg = SendGridClient(api_key="SG.test", sandbox_mode=True)
+        assert sg._resolve_sandbox(False) is False
+
+    def test_per_call_none_falls_back_to_client_true(self) -> None:
+        sg = SendGridClient(api_key="SG.test", sandbox_mode=True)
+        assert sg._resolve_sandbox(None) is True
+
+    def test_per_call_none_falls_back_to_client_false(self) -> None:
+        sg = SendGridClient(api_key="SG.test", sandbox_mode=False)
+        assert sg._resolve_sandbox(None) is False
+
+
+class TestSandboxBehavior:
+    def test_sandbox_applies_mail_settings(self, fake_api_client: MagicMock) -> None:
+        """Sandbox mode should set mail_settings on the Mail object."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", sandbox_mode=True)
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=200)
+
+        result = sg.send_text(to="user@example.com", subject="Test", body="Hello")
+        assert result.ok is True
+
+        # Verify send was called and mail_settings was applied
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is not None
+        assert sent_message.mail_settings.sandbox_mode is not None
+
+    def test_no_sandbox_no_mail_settings(self, fake_api_client: MagicMock) -> None:
+        """Without sandbox mode, mail_settings should not be set."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com")
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=202)
+
+        sg.send_text(to="user@example.com", subject="Test", body="Hello")
+
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is None
+
+    def test_per_call_sandbox_override(self, fake_api_client: MagicMock) -> None:
+        """Per-call sandbox=True should enable sandbox even when client has it off."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", sandbox_mode=False)
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=200)
+
+        sg.send_text(to="user@example.com", subject="Test", body="Hello", sandbox=True)
+
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is not None
+
+    def test_per_call_sandbox_false_disables(self, fake_api_client: MagicMock) -> None:
+        """Per-call sandbox=False should disable sandbox even when client has it on."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", sandbox_mode=True)
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=202)
+
+        sg.send_text(to="user@example.com", subject="Test", body="Hello", sandbox=False)
+
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is None
+
+    def test_sandbox_with_send_html(self, fake_api_client: MagicMock) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", sandbox_mode=True)
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=200)
+
+        result = sg.send_html(to="user@example.com", subject="Test", html="<p>Hi</p>")
+        assert result.ok is True
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is not None
+
+    def test_sandbox_with_send_template(self, fake_api_client: MagicMock) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", sandbox_mode=True)
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=200)
+
+        result = sg.send_template(to="user@example.com", template_id="d-abc123")
+        assert result.ok is True
+        sent_message = fake_api_client.send.call_args[0][0]
+        assert sent_message.mail_settings is not None

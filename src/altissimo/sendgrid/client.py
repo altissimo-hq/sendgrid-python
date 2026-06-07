@@ -56,6 +56,8 @@ class SendGridClient:
             Set to ``0`` (default) to disable retries.
         retry_delay: Base delay in seconds between retries. Actual delay
             uses exponential backoff with jitter.
+        sandbox_mode: When ``True``, all sends use SendGrid sandbox mode
+            (validates without delivering). Can be overridden per-call.
     """
 
     def __init__(
@@ -65,11 +67,13 @@ class SendGridClient:
         *,
         max_retries: int = 0,
         retry_delay: float = 1.0,
+        sandbox_mode: bool = False,
     ) -> None:
         self._api_key = api_key
         self._default_from = default_from
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._sandbox_mode = sandbox_mode
         self._client: SendGridAPIClient | None = None
 
     @classmethod
@@ -80,6 +84,7 @@ class SendGridClient:
         default_from: str | None = None,
         max_retries: int = 0,
         retry_delay: float = 1.0,
+        sandbox_mode: bool | None = None,
     ) -> SendGridClient:
         """Create a client using an API key from an environment variable.
 
@@ -88,6 +93,9 @@ class SendGridClient:
             default_from: Default sender email address.
             max_retries: Maximum number of retry attempts for transient errors.
             retry_delay: Base delay in seconds between retries.
+            sandbox_mode: Enable sandbox mode. If ``None`` (default), reads
+                from the ``SENDGRID_SANDBOX_MODE`` environment variable
+                (truthy values: ``1``, ``true``, ``yes``).
 
         Raises:
             ValueError: If the environment variable is not set.
@@ -96,7 +104,15 @@ class SendGridClient:
         if not api_key:
             msg = f"Environment variable '{env_var}' is not set or is empty."
             raise ValueError(msg)
-        return cls(api_key=api_key, default_from=default_from, max_retries=max_retries, retry_delay=retry_delay)
+        if sandbox_mode is None:
+            sandbox_mode = os.environ.get("SENDGRID_SANDBOX_MODE", "").lower() in ("1", "true", "yes")
+        return cls(
+            api_key=api_key,
+            default_from=default_from,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            sandbox_mode=sandbox_mode,
+        )
 
     @property
     def client(self) -> SendGridAPIClient:
@@ -175,6 +191,27 @@ class SendGridClient:
             error=str(exc),
         )
 
+    def _resolve_sandbox(self, per_call: bool | None) -> bool:
+        """Resolve sandbox mode: per-call overrides client-level."""
+        if per_call is not None:
+            return per_call
+        return self._sandbox_mode
+
+    @staticmethod
+    def _apply_sandbox(message: Any, enabled: bool) -> None:
+        """Enable SendGrid sandbox mode on a ``Mail`` object if requested."""
+        if not enabled:
+            return
+
+        try:
+            from sendgrid.helpers.mail import MailSettings, SandBoxMode
+        except ImportError:
+            raise SendGridImportError from None
+
+        mail_settings = MailSettings()
+        mail_settings.sandbox_mode = SandBoxMode(True)
+        message.mail_settings = mail_settings
+
     def _send_with_retry(self, message: Any) -> SendResult:
         """Send a message, retrying on transient failures with exponential backoff.
 
@@ -229,6 +266,7 @@ class SendGridClient:
         reply_to: str | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
+        sandbox: bool | None = None,
     ) -> SendResult:
         """Send a plain-text email.
 
@@ -240,6 +278,8 @@ class SendGridClient:
             reply_to: Reply-to email address.
             cc: CC recipient(s) — a single email or list of emails.
             bcc: BCC recipient(s) — a single email or list of emails.
+            sandbox: Enable sandbox mode for this call. Overrides client-level
+                ``sandbox_mode`` when explicitly set.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -258,6 +298,7 @@ class SendGridClient:
         )
 
         self._apply_cc_bcc(message, cc, bcc)
+        self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
@@ -276,6 +317,7 @@ class SendGridClient:
         reply_to: str | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
+        sandbox: bool | None = None,
     ) -> SendResult:
         """Send an HTML email.
 
@@ -287,6 +329,8 @@ class SendGridClient:
             reply_to: Reply-to email address.
             cc: CC recipient(s) — a single email or list of emails.
             bcc: BCC recipient(s) — a single email or list of emails.
+            sandbox: Enable sandbox mode for this call. Overrides client-level
+                ``sandbox_mode`` when explicitly set.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -305,6 +349,7 @@ class SendGridClient:
         )
 
         self._apply_cc_bcc(message, cc, bcc)
+        self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
@@ -323,6 +368,7 @@ class SendGridClient:
         reply_to: str | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
+        sandbox: bool | None = None,
     ) -> SendResult:
         """Send a dynamic template email.
 
@@ -334,6 +380,8 @@ class SendGridClient:
             reply_to: Reply-to email address.
             cc: CC recipient(s) — a single email or list of emails.
             bcc: BCC recipient(s) — a single email or list of emails.
+            sandbox: Enable sandbox mode for this call. Overrides client-level
+                ``sandbox_mode`` when explicitly set.
 
         Returns:
             A ``SendResult`` with the API response details.
@@ -353,6 +401,7 @@ class SendGridClient:
         message.template_id = template_id
 
         self._apply_cc_bcc(message, cc, bcc)
+        self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
             from sendgrid.helpers.mail import ReplyTo
