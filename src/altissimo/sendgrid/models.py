@@ -1,8 +1,27 @@
-"""SendGrid email result model."""
+"""SendGrid email models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True, slots=True)
+class EmailAddress:
+    """An email address with an optional display name.
+
+    Supports three input forms for convenience:
+
+    - Plain string: ``"user@example.com"``
+    - Tuple: ``("user@example.com", "Display Name")``
+    - Dataclass: ``EmailAddress("user@example.com", "Display Name")``
+
+    Attributes:
+        email: The email address.
+        name: Optional display name (e.g. ``"Darwin's Ark"``).
+    """
+
+    email: str
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

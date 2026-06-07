@@ -1,8 +1,37 @@
-"""Tests for SendResult model."""
+"""Tests for models."""
 
 from __future__ import annotations
 
-from altissimo.sendgrid.models import SendResult
+import pytest
+
+from altissimo.sendgrid.models import EmailAddress, SendResult
+
+
+class TestEmailAddress:
+    def test_with_name(self) -> None:
+        addr = EmailAddress(email="user@example.com", name="User Name")
+        assert addr.email == "user@example.com"
+        assert addr.name == "User Name"
+
+    def test_without_name(self) -> None:
+        addr = EmailAddress(email="user@example.com")
+        assert addr.email == "user@example.com"
+        assert addr.name is None
+
+    def test_frozen(self) -> None:
+        addr = EmailAddress(email="user@example.com")
+        with pytest.raises(AttributeError):
+            addr.email = "other@example.com"  # type: ignore[misc]
+
+    def test_equality(self) -> None:
+        a1 = EmailAddress("user@example.com", "User")
+        a2 = EmailAddress("user@example.com", "User")
+        assert a1 == a2
+
+    def test_repr(self) -> None:
+        addr = EmailAddress("user@example.com", "User")
+        assert "EmailAddress" in repr(addr)
+        assert "user@example.com" in repr(addr)
 
 
 class TestSendResult:
@@ -26,7 +55,6 @@ class TestSendResult:
 
     def test_frozen(self) -> None:
         result = SendResult(ok=True, status_code=202)
-        import pytest
 
         with pytest.raises(AttributeError):
             result.ok = False  # type: ignore[misc]

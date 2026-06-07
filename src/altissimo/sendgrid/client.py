@@ -9,15 +9,20 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from altissimo.sendgrid.exceptions import SendGridImportError
-from altissimo.sendgrid.models import SendResult
+from altissimo.sendgrid.models import EmailAddress, SendResult
 
 if TYPE_CHECKING:
     from sendgrid import SendGridAPIClient
 
 logger = logging.getLogger(__name__)
 
-#: Type alias for recipient arguments — a single email or a list of emails.
-EmailRecipients = str | list[str]
+#: Flexible type for email address arguments — plain string, (email, name) tuple,
+#: or :class:`EmailAddress` dataclass.
+EmailAddressLike = str | tuple[str, str] | EmailAddress
+
+#: Type alias for recipient arguments — a single address or a list of addresses.
+#: Each element can be any :data:`EmailAddressLike` form.
+EmailRecipients = EmailAddressLike | list[EmailAddressLike]
 
 #: HTTP status codes that are considered transient and eligible for retry.
 _RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
@@ -50,8 +55,8 @@ class SendGridClient:
 
     Args:
         api_key: SendGrid API key.
-        default_from: Default sender email address. Used when ``from_email``
-            is not provided to individual send methods.
+        default_from: Default sender email address. Accepts a plain string,
+            a ``(email, name)`` tuple, or an :class:`EmailAddress`.
         max_retries: Maximum number of retry attempts for transient errors.
             Set to ``0`` (default) to disable retries.
         retry_delay: Base delay in seconds between retries. Actual delay
@@ -63,7 +68,7 @@ class SendGridClient:
     def __init__(
         self,
         api_key: str,
-        default_from: str | None = None,
+        default_from: EmailAddressLike | None = None,
         *,
         max_retries: int = 0,
         retry_delay: float = 1.0,
@@ -81,7 +86,7 @@ class SendGridClient:
         cls,
         *,
         env_var: str = "SENDGRID_API_KEY",
-        default_from: str | None = None,
+        default_from: EmailAddressLike | None = None,
         max_retries: int = 0,
         retry_delay: float = 1.0,
         sandbox_mode: bool | None = None,
@@ -121,8 +126,71 @@ class SendGridClient:
             self._client = _get_sendgrid_api_client(self._api_key)
         return self._client
 
-    def _resolve_from(self, from_email: str | None) -> str:
+    # ------------------------------------------------------------------
+    # Email address resolution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_email(value: EmailAddressLike) -> Any:
+        """Convert any email address format to a SendGrid ``Email`` object.
+
+        Args:
+            value: A plain string, ``(email, name)`` tuple, or :class:`EmailAddress`.
+
+        Returns:
+            A ``sendgrid.helpers.mail.Email`` instance.
+
+        Raises:
+            SendGridImportError: If the ``sendgrid`` package is not installed.
+            TypeError: If *value* is not a supported type.
+        """
+        try:
+            from sendgrid.helpers.mail import Email
+        except ImportError:
+            raise SendGridImportError from None
+
+        if isinstance(value, str):
+            return Email(value)
+        if isinstance(value, tuple):
+            return Email(email=value[0], name=value[1])
+        if isinstance(value, EmailAddress):
+            return Email(email=value.email, name=value.name)
+        msg = f"Unsupported email address type: {type(value)}"
+        raise TypeError(msg)
+
+    @staticmethod
+    def _resolve_to(
+        value: EmailAddressLike,
+        dynamic_template_data: dict[str, Any] | None = None,
+    ) -> Any:
+        """Convert an email address to a SendGrid ``To`` object.
+
+        Args:
+            value: A plain string, ``(email, name)`` tuple, or :class:`EmailAddress`.
+            dynamic_template_data: Optional template data for dynamic templates.
+
+        Returns:
+            A ``sendgrid.helpers.mail.To`` instance.
+        """
+        try:
+            from sendgrid.helpers.mail import To
+        except ImportError:
+            raise SendGridImportError from None
+
+        if isinstance(value, str):
+            return To(email=value, dynamic_template_data=dynamic_template_data)
+        if isinstance(value, tuple):
+            return To(email=value[0], name=value[1], dynamic_template_data=dynamic_template_data)
+        if isinstance(value, EmailAddress):
+            return To(email=value.email, name=value.name, dynamic_template_data=dynamic_template_data)
+        msg = f"Unsupported email address type: {type(value)}"
+        raise TypeError(msg)
+
+    def _resolve_from(self, from_email: EmailAddressLike | None) -> Any:
         """Resolve the sender email, falling back to the default.
+
+        Returns:
+            A ``sendgrid.helpers.mail.Email`` instance.
 
         Raises:
             ValueError: If no sender email is provided or configured.
@@ -131,17 +199,17 @@ class SendGridClient:
         if not resolved:
             msg = "No sender email provided. Pass 'from_email' to the send method or set 'default_from' on the client."
             raise ValueError(msg)
-        return resolved
+        return self._resolve_email(resolved)
 
     @staticmethod
-    def _normalize_recipients(recipients: EmailRecipients) -> list[str]:
-        """Normalize a recipient argument to a list of email strings."""
-        if isinstance(recipients, str):
-            return [recipients]
-        return list(recipients)
+    def _normalize_recipients(recipients: EmailRecipients) -> list[EmailAddressLike]:
+        """Normalize a recipient argument to a list."""
+        if isinstance(recipients, list):
+            return list(recipients)
+        return [recipients]
 
-    @staticmethod
     def _apply_cc_bcc(
+        self,
         message: Any,
         cc: EmailRecipients | None,
         bcc: EmailRecipients | None,
@@ -160,14 +228,20 @@ class SendGridClient:
         personalization = message.personalizations[0]
 
         if cc:
-            cc_list = [cc] if isinstance(cc, str) else cc
+            cc_list = self._normalize_recipients(cc)
             for addr in cc_list:
-                personalization.add_cc(Cc(addr))
+                resolved = self._resolve_email(addr)
+                personalization.add_cc(Cc(email=resolved.email, name=resolved.name))
 
         if bcc:
-            bcc_list = [bcc] if isinstance(bcc, str) else bcc
+            bcc_list = self._normalize_recipients(bcc)
             for addr in bcc_list:
-                personalization.add_bcc(Bcc(addr))
+                resolved = self._resolve_email(addr)
+                personalization.add_bcc(Bcc(email=resolved.email, name=resolved.name))
+
+    # ------------------------------------------------------------------
+    # Result building
+    # ------------------------------------------------------------------
 
     def _build_result(self, response: Any) -> SendResult:
         """Convert a SendGrid API response to a ``SendResult``."""
@@ -191,6 +265,10 @@ class SendGridClient:
             error=str(exc),
         )
 
+    # ------------------------------------------------------------------
+    # Sandbox mode
+    # ------------------------------------------------------------------
+
     def _resolve_sandbox(self, per_call: bool | None) -> bool:
         """Resolve sandbox mode: per-call overrides client-level."""
         if per_call is not None:
@@ -211,6 +289,10 @@ class SendGridClient:
         mail_settings = MailSettings()
         mail_settings.sandbox_mode = SandBoxMode(True)
         message.mail_settings = mail_settings
+
+    # ------------------------------------------------------------------
+    # Retry logic
+    # ------------------------------------------------------------------
 
     def _send_with_retry(self, message: Any) -> SendResult:
         """Send a message, retrying on transient failures with exponential backoff.
@@ -256,14 +338,18 @@ class SendGridClient:
         jitter = random.uniform(0, delay * 0.5)  # noqa: S311
         time.sleep(delay + jitter)
 
+    # ------------------------------------------------------------------
+    # Send methods
+    # ------------------------------------------------------------------
+
     def send_text(
         self,
         *,
         to: EmailRecipients,
         subject: str,
         body: str,
-        from_email: str | None = None,
-        reply_to: str | None = None,
+        from_email: EmailAddressLike | None = None,
+        reply_to: EmailAddressLike | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
         sandbox: bool | None = None,
@@ -274,10 +360,11 @@ class SendGridClient:
             to: Recipient email address or list of addresses.
             subject: Email subject line.
             body: Plain-text email body.
-            from_email: Sender email address (overrides ``default_from``).
-            reply_to: Reply-to email address.
-            cc: CC recipient(s) — a single email or list of emails.
-            bcc: BCC recipient(s) — a single email or list of emails.
+            from_email: Sender email (overrides ``default_from``). Accepts
+                a string, ``(email, name)`` tuple, or :class:`EmailAddress`.
+            reply_to: Reply-to email address. Accepts same forms as ``from_email``.
+            cc: CC recipient(s) — a single address or list of addresses.
+            bcc: BCC recipient(s) — a single address or list of addresses.
             sandbox: Enable sandbox mode for this call. Overrides client-level
                 ``sandbox_mode`` when explicitly set.
 
@@ -290,9 +377,11 @@ class SendGridClient:
             raise SendGridImportError from None
 
         sender = self._resolve_from(from_email)
+        recipients = self._normalize_recipients(to)
+        to_emails = [self._resolve_to(r) for r in recipients]
         message = Mail(
             from_email=sender,
-            to_emails=self._normalize_recipients(to),
+            to_emails=to_emails,
             subject=subject,
             plain_text_content=body,
         )
@@ -301,11 +390,12 @@ class SendGridClient:
         self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
-            from sendgrid.helpers.mail import ReplyTo
+            message.reply_to = self._resolve_email(reply_to)
 
-            message.reply_to = ReplyTo(reply_to)
-
-        return self._send_with_retry(message)
+        result = self._send_with_retry(message)
+        if result.ok:
+            logger.info("Email sent: subject=%r to=%s status=%d", subject, to, result.status_code)
+        return result
 
     def send_html(
         self,
@@ -313,8 +403,8 @@ class SendGridClient:
         to: EmailRecipients,
         subject: str,
         html: str,
-        from_email: str | None = None,
-        reply_to: str | None = None,
+        from_email: EmailAddressLike | None = None,
+        reply_to: EmailAddressLike | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
         sandbox: bool | None = None,
@@ -325,10 +415,11 @@ class SendGridClient:
             to: Recipient email address or list of addresses.
             subject: Email subject line.
             html: HTML email body.
-            from_email: Sender email address (overrides ``default_from``).
-            reply_to: Reply-to email address.
-            cc: CC recipient(s) — a single email or list of emails.
-            bcc: BCC recipient(s) — a single email or list of emails.
+            from_email: Sender email (overrides ``default_from``). Accepts
+                a string, ``(email, name)`` tuple, or :class:`EmailAddress`.
+            reply_to: Reply-to email address. Accepts same forms as ``from_email``.
+            cc: CC recipient(s) — a single address or list of addresses.
+            bcc: BCC recipient(s) — a single address or list of addresses.
             sandbox: Enable sandbox mode for this call. Overrides client-level
                 ``sandbox_mode`` when explicitly set.
 
@@ -341,9 +432,11 @@ class SendGridClient:
             raise SendGridImportError from None
 
         sender = self._resolve_from(from_email)
+        recipients = self._normalize_recipients(to)
+        to_emails = [self._resolve_to(r) for r in recipients]
         message = Mail(
             from_email=sender,
-            to_emails=self._normalize_recipients(to),
+            to_emails=to_emails,
             subject=subject,
             html_content=html,
         )
@@ -352,11 +445,12 @@ class SendGridClient:
         self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
-            from sendgrid.helpers.mail import ReplyTo
+            message.reply_to = self._resolve_email(reply_to)
 
-            message.reply_to = ReplyTo(reply_to)
-
-        return self._send_with_retry(message)
+        result = self._send_with_retry(message)
+        if result.ok:
+            logger.info("Email sent: subject=%r to=%s status=%d", subject, to, result.status_code)
+        return result
 
     def send_template(
         self,
@@ -364,8 +458,8 @@ class SendGridClient:
         to: EmailRecipients,
         template_id: str,
         dynamic_data: dict[str, Any] | None = None,
-        from_email: str | None = None,
-        reply_to: str | None = None,
+        from_email: EmailAddressLike | None = None,
+        reply_to: EmailAddressLike | None = None,
         cc: EmailRecipients | None = None,
         bcc: EmailRecipients | None = None,
         sandbox: bool | None = None,
@@ -376,10 +470,11 @@ class SendGridClient:
             to: Recipient email address or list of addresses.
             template_id: SendGrid dynamic template ID (e.g. ``d-abc123``).
             dynamic_data: Template variable substitutions.
-            from_email: Sender email address (overrides ``default_from``).
-            reply_to: Reply-to email address.
-            cc: CC recipient(s) — a single email or list of emails.
-            bcc: BCC recipient(s) — a single email or list of emails.
+            from_email: Sender email (overrides ``default_from``). Accepts
+                a string, ``(email, name)`` tuple, or :class:`EmailAddress`.
+            reply_to: Reply-to email address. Accepts same forms as ``from_email``.
+            cc: CC recipient(s) — a single address or list of addresses.
+            bcc: BCC recipient(s) — a single address or list of addresses.
             sandbox: Enable sandbox mode for this call. Overrides client-level
                 ``sandbox_mode`` when explicitly set.
 
@@ -387,13 +482,13 @@ class SendGridClient:
             A ``SendResult`` with the API response details.
         """
         try:
-            from sendgrid.helpers.mail import Mail, To
+            from sendgrid.helpers.mail import Mail
         except ImportError:
             raise SendGridImportError from None
 
         sender = self._resolve_from(from_email)
         recipients = self._normalize_recipients(to)
-        to_emails = [To(email=addr, dynamic_template_data=dynamic_data or {}) for addr in recipients]
+        to_emails = [self._resolve_to(r, dynamic_template_data=dynamic_data or {}) for r in recipients]
         message = Mail(
             from_email=sender,
             to_emails=to_emails,
@@ -404,8 +499,9 @@ class SendGridClient:
         self._apply_sandbox(message, self._resolve_sandbox(sandbox))
 
         if reply_to:
-            from sendgrid.helpers.mail import ReplyTo
+            message.reply_to = self._resolve_email(reply_to)
 
-            message.reply_to = ReplyTo(reply_to)
-
-        return self._send_with_retry(message)
+        result = self._send_with_retry(message)
+        if result.ok:
+            logger.info("Email sent: template=%s to=%s status=%d", template_id, to, result.status_code)
+        return result

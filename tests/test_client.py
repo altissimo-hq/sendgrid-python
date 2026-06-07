@@ -70,11 +70,19 @@ class TestLazyClient:
 class TestResolveFrom:
     def test_explicit_from(self) -> None:
         sg = SendGridClient(api_key="SG.test", default_from="default@example.com")
-        assert sg._resolve_from("explicit@example.com") == "explicit@example.com"
+        result = sg._resolve_from("explicit@example.com")
+        assert result.email == "explicit@example.com"
 
     def test_default_from(self) -> None:
         sg = SendGridClient(api_key="SG.test", default_from="default@example.com")
-        assert sg._resolve_from(None) == "default@example.com"
+        result = sg._resolve_from(None)
+        assert result.email == "default@example.com"
+
+    def test_default_from_with_name(self) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from=("team@example.com", "My Team"))
+        result = sg._resolve_from(None)
+        assert result.email == "team@example.com"
+        assert result.name == "My Team"
 
     def test_no_from_raises(self) -> None:
         sg = SendGridClient(api_key="SG.test")
@@ -616,3 +624,170 @@ class TestSandboxBehavior:
         assert result.ok is True
         sent_message = fake_api_client.send.call_args[0][0]
         assert sent_message.mail_settings is not None
+
+
+class TestResolveEmail:
+    def test_string(self) -> None:
+        result = SendGridClient._resolve_email("user@example.com")
+        assert result.email == "user@example.com"
+        assert result.name is None
+
+    def test_tuple(self) -> None:
+        result = SendGridClient._resolve_email(("user@example.com", "User Name"))
+        assert result.email == "user@example.com"
+        assert result.name == "User Name"
+
+    def test_email_address_dataclass(self) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = SendGridClient._resolve_email(EmailAddress("user@example.com", "User Name"))
+        assert result.email == "user@example.com"
+        assert result.name == "User Name"
+
+    def test_email_address_no_name(self) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = SendGridClient._resolve_email(EmailAddress("user@example.com"))
+        assert result.email == "user@example.com"
+        assert result.name is None
+
+    def test_unsupported_type_raises(self) -> None:
+        with pytest.raises(TypeError, match="Unsupported email address type"):
+            SendGridClient._resolve_email(12345)  # type: ignore[arg-type]
+
+
+class TestEmailAddressLikeSend:
+    """Test that all EmailAddressLike forms work in send methods."""
+
+    def test_from_as_tuple(self, fake_api_client: MagicMock) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from=("team@example.com", "My Team"))
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=202)
+
+        result = sg.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is True
+
+    def test_from_as_email_address(self, fake_api_client: MagicMock) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        sg = SendGridClient(api_key="SG.test", default_from=EmailAddress("team@example.com", "My Team"))
+        sg._client = fake_api_client
+        fake_api_client.send.return_value = FakeResponse(status_code=202)
+
+        result = sg.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is True
+
+    def test_per_call_from_as_tuple(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_html(
+            to="user@example.com",
+            subject="Hi",
+            html="<p>Hi</p>",
+            from_email=("ceo@example.com", "Jane Smith"),
+        )
+        assert result.ok is True
+
+    def test_reply_to_as_tuple(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hi",
+            body="Hello",
+            reply_to=("support@example.com", "Support Team"),
+        )
+        assert result.ok is True
+
+    def test_reply_to_as_email_address(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hi",
+            body="Hello",
+            reply_to=EmailAddress("support@example.com", "Support"),
+        )
+        assert result.ok is True
+
+    def test_to_as_tuple(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to=("user@example.com", "User"),
+            subject="Hi",
+            body="Hello",
+        )
+        assert result.ok is True
+
+    def test_to_as_email_address_list(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = client_with_mock.send_html(
+            to=[EmailAddress("a@example.com", "Alice"), EmailAddress("b@example.com", "Bob")],
+            subject="Hi",
+            html="<p>Hi</p>",
+        )
+        assert result.ok is True
+
+    def test_cc_as_tuple(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hi",
+            body="Hello",
+            cc=("cc@example.com", "CC Person"),
+        )
+        assert result.ok is True
+
+    def test_bcc_as_email_address(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = client_with_mock.send_text(
+            to="user@example.com",
+            subject="Hi",
+            body="Hello",
+            bcc=EmailAddress("bcc@example.com", "BCC Person"),
+        )
+        assert result.ok is True
+
+    def test_template_with_named_recipients(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        from altissimo.sendgrid.models import EmailAddress
+
+        result = client_with_mock.send_template(
+            to=[EmailAddress("user@example.com", "Alice")],
+            template_id="d-abc123",
+            dynamic_data={"name": "Alice"},
+            from_email=("team@example.com", "My Team"),
+            reply_to=EmailAddress("support@example.com", "Support"),
+        )
+        assert result.ok is True
+
+
+class TestSuccessLogging:
+    def test_send_text_logs_on_success(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+
+        with patch("altissimo.sendgrid.client.logger") as mock_logger:
+            result = client_with_mock.send_text(to="user@example.com", subject="Hello", body="Hi")
+        assert result.ok is True
+        mock_logger.info.assert_called_once()
+        log_args = mock_logger.info.call_args
+        assert "subject" in log_args[0][0]
+        assert "Hello" in str(log_args)
+
+    def test_send_html_logs_on_success(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        with patch("altissimo.sendgrid.client.logger") as mock_logger:
+            result = client_with_mock.send_html(to="user@example.com", subject="Hi", html="<p>Hi</p>")
+        assert result.ok is True
+        mock_logger.info.assert_called_once()
+        assert "subject" in mock_logger.info.call_args[0][0]
+
+    def test_send_template_logs_on_success(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        with patch("altissimo.sendgrid.client.logger") as mock_logger:
+            result = client_with_mock.send_template(
+                to="user@example.com", template_id="d-abc123", dynamic_data={"name": "Test"}
+            )
+        assert result.ok is True
+        mock_logger.info.assert_called_once()
+        assert "template" in mock_logger.info.call_args[0][0]
+        assert "d-abc123" in str(mock_logger.info.call_args)
+
+    def test_no_log_on_failure(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
+        fake_api_client.send.side_effect = Exception("fail")
+        with patch("altissimo.sendgrid.client.logger") as mock_logger:
+            result = client_with_mock.send_text(to="user@example.com", subject="Hi", body="Hello")
+        assert result.ok is False
+        mock_logger.info.assert_not_called()
