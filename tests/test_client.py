@@ -759,7 +759,6 @@ class TestEmailAddressLikeSend:
 
 class TestSuccessLogging:
     def test_send_text_logs_on_success(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
-
         with patch("altissimo.sendgrid.client.logger") as mock_logger:
             result = client_with_mock.send_text(to="user@example.com", subject="Hello", body="Hi")
         assert result.ok is True
