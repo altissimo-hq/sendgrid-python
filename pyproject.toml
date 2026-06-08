@@ -42,6 +42,7 @@ packages = [
 ]
 
 [tool.poetry.group.dev.dependencies]
+mypy = ">=1.13"
 pytest = ">=8.0"
 pytest-cov = ">=6.0"
 ruff = ">=0.11"
@@ -87,3 +88,12 @@ omit = ["*/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
