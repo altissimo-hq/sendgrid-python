@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/altissimo-hq/sendgrid-python/actions/workflows/ci.yml/badge.svg)](https://github.com/altissimo-hq/sendgrid-python/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org)
-[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 Reusable SendGrid email client for Altissimo Python projects.
@@ -122,4 +122,4 @@ For reporting security vulnerabilities, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-GNU General Public License v3.0 or later — see [LICENSE](LICENSE) for details.
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
