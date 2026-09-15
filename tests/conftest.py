@@ -28,9 +28,23 @@ def fake_api_client() -> MagicMock:
 
 @pytest.fixture
 def client_with_mock(fake_api_client: MagicMock) -> Any:
-    """Return a ``SendGridClient`` wired to the fake API client."""
+    """Return a ``SendGridClient`` wired to the fake API client (default: raises on error)."""
     from altissimo.sendgrid import SendGridClient
 
     sg = SendGridClient(api_key="SG.fake-key", default_from="sender@example.com")
+    sg._client = fake_api_client
+    return sg
+
+
+@pytest.fixture
+def client_no_raise(fake_api_client: MagicMock) -> Any:
+    """Return a ``SendGridClient`` in swallow mode, for exercising ``ok=False`` results."""
+    from altissimo.sendgrid import SendGridClient
+
+    sg = SendGridClient(
+        api_key="SG.fake-key",
+        default_from="sender@example.com",
+        raise_on_error=False,
+    )
     sg._client = fake_api_client
     return sg

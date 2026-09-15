@@ -64,6 +64,12 @@ class SendGridClient:
             uses exponential backoff with jitter.
         sandbox_mode: When ``True``, all sends use SendGrid sandbox mode
             (validates without delivering). Can be overridden per-call.
+        raise_on_error: If ``True`` (default), a failed send raises
+            :class:`SendGridSendError` instead of returning a
+            ``SendResult`` with ``ok=False``. Set to ``False`` for batch
+            sends where you want to inspect results and continue past a
+            failed recipient — but then you are responsible for checking
+            ``result.ok``, because nothing else will.
     """
 
     def __init__(
@@ -74,8 +80,9 @@ class SendGridClient:
         max_retries: int = 0,
         retry_delay: float = 1.0,
         sandbox_mode: bool = False,
+        raise_on_error: bool = True,
     ) -> None:
-        self._init_common(default_from, max_retries, retry_delay, sandbox_mode)
+        self._init_common(default_from, max_retries, retry_delay, sandbox_mode, raise_on_error)
         self._api_key: str | None = api_key
         self._api_key_env_var: str | None = None
 
@@ -85,11 +92,13 @@ class SendGridClient:
         max_retries: int,
         retry_delay: float,
         sandbox_mode: bool,
+        raise_on_error: bool,
     ) -> None:
         self._default_from = default_from
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._sandbox_mode = sandbox_mode
+        self._raise_on_error = raise_on_error
         self._client: SendGridAPIClient | None = None
 
     @classmethod
@@ -101,6 +110,7 @@ class SendGridClient:
         max_retries: int = 0,
         retry_delay: float = 1.0,
         sandbox_mode: bool | None = None,
+        raise_on_error: bool = True,
     ) -> SendGridClient:
         """Create a client that reads its API key from an environment variable.
 
@@ -116,6 +126,7 @@ class SendGridClient:
             sandbox_mode: Enable sandbox mode. If ``None`` (default), reads
                 from the ``SENDGRID_SANDBOX_MODE`` environment variable
                 (truthy values: ``1``, ``true``, ``yes``).
+            raise_on_error: Raise :class:`SendGridSendError` on send failure.
 
         Raises:
             ValueError: If the environment variable is not set or is empty,
@@ -124,7 +135,7 @@ class SendGridClient:
         if sandbox_mode is None:
             sandbox_mode = os.environ.get("SENDGRID_SANDBOX_MODE", "").lower() in ("1", "true", "yes")
         instance = cls.__new__(cls)
-        instance._init_common(default_from, max_retries, retry_delay, sandbox_mode)
+        instance._init_common(default_from, max_retries, retry_delay, sandbox_mode, raise_on_error)
         instance._api_key = None
         instance._api_key_env_var = env_var
         return instance
@@ -284,12 +295,28 @@ class SendGridClient:
         )
 
     def _build_error_result(self, exc: Exception) -> SendResult:
-        """Build a ``SendResult`` from an exception."""
-        logger.exception("SendGrid API error")
+        """Build a ``SendResult`` from an exception.
+
+        Deliberately does not log at warning or above. The library has no
+        recipient, subject, or template context here, so a log emitted from
+        this frame is both unactionable and misleading — it makes the failure
+        look handled. Reporting is the caller's job: the exception is
+        preserved on the result, and the send methods either raise it or log
+        it with full context.
+        """
+        status_code = 0
+        if hasattr(exc, "status_code"):
+            status_code = getattr(exc, "status_code", 0)
+        elif hasattr(exc, "code"):
+            status_code = getattr(exc, "code", 0)
+
+        logger.debug("SendGrid API error (status=%s)", status_code, exc_info=exc)
+
         return SendResult(
             ok=False,
-            status_code=0,
+            status_code=status_code,
             error=str(exc),
+            exception=exc,
         )
 
     # ------------------------------------------------------------------
@@ -321,11 +348,24 @@ class SendGridClient:
     # Retry logic
     # ------------------------------------------------------------------
 
-    def _send_with_retry(self, message: Any) -> SendResult:
+    def _send_with_retry(self, message: Any, *, context: str = "") -> SendResult:
         """Send a message, retrying on transient failures with exponential backoff.
 
-        Retries are only attempted when ``max_retries > 0`` and the response
-        status code is in ``_RETRYABLE_STATUS_CODES``.
+        Retries are only attempted when ``max_retries > 0`` and the failure
+        is transient — a response in ``_RETRYABLE_STATUS_CODES``, or an
+        exception with no discoverable HTTP status (network errors, etc.).
+
+        Args:
+            message: The SendGrid ``Mail`` object to send.
+            context: Description of the send, used in retry logs and in the
+                raised exception message.
+
+        Returns:
+            A ``SendResult`` with the API response details.
+
+        Raises:
+            SendGridSendError: If the send ultimately failed and the client
+                was constructed with ``raise_on_error=True`` (the default).
         """
         last_result: SendResult | None = None
 
@@ -334,30 +374,34 @@ class SendGridClient:
                 response = self.client.send(message)
             except Exception as exc:
                 last_result = self._build_error_result(exc)
-                # Exceptions (network errors, etc.) are also retryable
-                if attempt < self._max_retries:
-                    self._backoff(attempt)
-                    continue
+            else:
+                last_result = self._build_result(response)
+
+            if last_result.ok:
                 return last_result
 
-            result = self._build_result(response)
-
-            if result.ok or result.status_code not in _RETRYABLE_STATUS_CODES:
-                return result
-
-            # Transient failure — retry if we have attempts left
-            last_result = result
-            if attempt < self._max_retries:
+            retryable = last_result.status_code in _RETRYABLE_STATUS_CODES or last_result.status_code == 0
+            if attempt < self._max_retries and retryable:
                 logger.warning(
-                    "SendGrid returned %d, retrying (attempt %d/%d)",
-                    result.status_code,
+                    "SendGrid error (status=%d) for %s, retrying (attempt %d/%d)",
+                    last_result.status_code,
+                    context or "send",
                     attempt + 1,
                     self._max_retries,
                 )
                 self._backoff(attempt)
+                continue
 
-        # All retries exhausted — return the last result
-        return last_result  # type: ignore[return-value]
+            return self._finalize(last_result, context)
+
+        # All retries exhausted
+        return self._finalize(last_result, context)  # type: ignore[arg-type]
+
+    def _finalize(self, result: SendResult, context: str = "") -> SendResult:
+        """Raise if the send failed and ``raise_on_error`` is enabled, else return it."""
+        if self._raise_on_error:
+            result.raise_for_status(context or None)
+        return result
 
     def _backoff(self, attempt: int) -> None:
         """Sleep with exponential backoff and jitter."""
@@ -419,9 +463,19 @@ class SendGridClient:
         if reply_to:
             message.reply_to = self._resolve_email(reply_to)
 
-        result = self._send_with_retry(message)
+        context = f"to={to} subject={subject!r}"
+        result = self._send_with_retry(message, context=context)
         if result.ok:
             logger.info("Email sent: subject=%r to=%s status=%d", subject, to, result.status_code)
+        else:
+            # Only reachable when raise_on_error=False.
+            logger.warning(
+                "Email send failed: subject=%r to=%s status=%d error=%s",
+                subject,
+                to,
+                result.status_code,
+                result.error,
+            )
         return result
 
     def send_html(
@@ -474,9 +528,19 @@ class SendGridClient:
         if reply_to:
             message.reply_to = self._resolve_email(reply_to)
 
-        result = self._send_with_retry(message)
+        context = f"to={to} subject={subject!r}"
+        result = self._send_with_retry(message, context=context)
         if result.ok:
             logger.info("Email sent: subject=%r to=%s status=%d", subject, to, result.status_code)
+        else:
+            # Only reachable when raise_on_error=False.
+            logger.warning(
+                "Email send failed: subject=%r to=%s status=%d error=%s",
+                subject,
+                to,
+                result.status_code,
+                result.error,
+            )
         return result
 
     def send_template(
@@ -528,7 +592,17 @@ class SendGridClient:
         if reply_to:
             message.reply_to = self._resolve_email(reply_to)
 
-        result = self._send_with_retry(message)
+        context = f"to={to} template={template_id}"
+        result = self._send_with_retry(message, context=context)
         if result.ok:
             logger.info("Email sent: template=%s to=%s status=%d", template_id, to, result.status_code)
+        else:
+            # Only reachable when raise_on_error=False.
+            logger.warning(
+                "Email send failed: template=%s to=%s status=%d error=%s",
+                template_id,
+                to,
+                result.status_code,
+                result.error,
+            )
         return result

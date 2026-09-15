@@ -5,12 +5,19 @@ from __future__ import annotations
 
 class TestPublicAPI:
     def test_imports(self) -> None:
-        from altissimo.sendgrid import SendGridClient, SendGridError, SendGridImportError, SendResult
+        from altissimo.sendgrid import (
+            SendGridClient,
+            SendGridError,
+            SendGridImportError,
+            SendGridSendError,
+            SendResult,
+        )
 
         assert SendGridClient is not None
         assert SendResult is not None
         assert SendGridError is not None
         assert SendGridImportError is not None
+        assert SendGridSendError is not None
 
     def test_version(self) -> None:
         from altissimo.sendgrid import __version__
