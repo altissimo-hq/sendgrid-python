@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-15
+
+### Fixed
+
+- Config and programming errors were retried and relabelled as send failures.
+  `_send_with_retry` resolved `client` (which can raise `ValueError` for a missing
+  `from_env()` API key, or `SendGridImportError` for an uninstalled SDK) *inside*
+  the retry loop's `try` block, so those errors were caught, given
+  `status_code=0`, retried through the full backoff schedule, and finally raised
+  as a misleading `SendGridSendError`. `client` is now resolved once before the
+  loop, so config/import errors propagate immediately and unretried. Likewise, a
+  non-HTTP, non-transport exception from the send itself (a bug in the SDK call,
+  a malformed payload) now propagates unwrapped instead of being retried and
+  relabelled — only real transport failures (`OSError` and subclasses:
+  `ConnectionError`, `TimeoutError`, `URLError`, ...) and HTTP errors from the
+  SendGrid SDK (anything carrying `.status_code`) are treated as send failures.
+  (#12)
+- `_build_error_result`'s `.code` fallback now only applies to
+  `urllib.error.HTTPError`, instead of trusting a `.code` attribute on any
+  exception — an unrelated exception with its own `.code` attribute could
+  otherwise produce a meaningless status that then drove retry classification.
+  (#12)
+
+### Security
+
+- `python_http_client` (the transport layer under the `sendgrid` SDK) logs full
+  request/response headers — including the live API key in the `Authorization`
+  header — at `DEBUG`. `SendGridClient` now suppresses that logger to `WARNING`
+  on first use, so a consumer with permissive third-party logging doesn't leak
+  the key as a side effect of adopting this library. (#11)
+
 ## [0.2.0] - 2026-09-15
 
 ### Changed
@@ -66,6 +97,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pytest setup with unit tests
 - Pre-commit hooks configuration
 - GitHub Actions CI workflow (lint, test matrix 3.11–3.13, build verification)
-
-[0.2.0]: https://github.com/altissimo-hq/sendgrid-python/releases/tag/v0.2.0
-[0.1.0]: https://github.com/altissimo-hq/sendgrid-python/releases/tag/v0.1.0

@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import time
+import urllib.error
 from typing import TYPE_CHECKING, Any
 
 from altissimo.sendgrid.exceptions import SendGridImportError
@@ -40,6 +41,13 @@ def _get_sendgrid_api_client(api_key: str) -> SendGridAPIClient:
         from sendgrid import SendGridAPIClient as _Client
     except ImportError:
         raise SendGridImportError from None
+
+    # python_http_client logs full request/response headers — including the
+    # live API key in the Authorization header — at DEBUG. Suppress it so a
+    # consumer with permissive third-party logging doesn't leak the key as a
+    # side effect of adopting this library. Consumers who want raw
+    # request/response logging can still lower this level themselves.
+    logging.getLogger("python_http_client").setLevel(logging.WARNING)
 
     return _Client(api_key=api_key)
 
@@ -306,9 +314,9 @@ class SendGridClient:
         """
         status_code = 0
         if hasattr(exc, "status_code"):
-            status_code = getattr(exc, "status_code", 0)
-        elif hasattr(exc, "code"):
-            status_code = getattr(exc, "code", 0)
+            status_code = int(getattr(exc, "status_code", 0) or 0)
+        elif isinstance(exc, urllib.error.HTTPError):
+            status_code = int(exc.code)
 
         logger.debug("SendGrid API error (status=%s)", status_code, exc_info=exc)
 
@@ -352,8 +360,17 @@ class SendGridClient:
         """Send a message, retrying on transient failures with exponential backoff.
 
         Retries are only attempted when ``max_retries > 0`` and the failure
-        is transient — a response in ``_RETRYABLE_STATUS_CODES``, or an
-        exception with no discoverable HTTP status (network errors, etc.).
+        is transient — a response in ``_RETRYABLE_STATUS_CODES``, or a
+        transport-level exception with no discoverable HTTP status (network
+        errors, timeouts, etc.).
+
+        Config and programming errors are deliberately *not* retried or
+        relabelled as send failures: resolving :attr:`client` (which may
+        raise ``ValueError`` for a missing API key, or
+        :class:`SendGridImportError`) happens before the retry loop, and any
+        exception from the send itself that carries no HTTP status and isn't
+        a transport error (``OSError``) — a malformed message, a bug in the
+        SDK call — propagates immediately instead of being caught here.
 
         Args:
             message: The SendGrid ``Mail`` object to send.
@@ -364,15 +381,29 @@ class SendGridClient:
             A ``SendResult`` with the API response details.
 
         Raises:
+            ValueError: If constructed via :meth:`from_env` and the API key
+                environment variable is not set or is empty.
+            SendGridImportError: If the ``sendgrid`` package is not installed.
             SendGridSendError: If the send ultimately failed and the client
                 was constructed with ``raise_on_error=True`` (the default).
         """
+        client = self.client  # Resolve eagerly — config/import errors must not be retried.
+
         last_result: SendResult | None = None
 
         for attempt in range(self._max_retries + 1):
             try:
-                response = self.client.send(message)
+                response = client.send(message)
+            except OSError as exc:
+                # Transport-level failure (network down, timeout, DNS, ...) — no
+                # HTTP status of its own, always worth retrying.
+                last_result = self._build_error_result(exc)
             except Exception as exc:
+                if not hasattr(exc, "status_code"):
+                    # Not an HTTP error from the SDK and not a transport failure —
+                    # a programming or payload error. Retrying can't fix it, and
+                    # relabelling it as a send failure would be misleading.
+                    raise
                 last_result = self._build_error_result(exc)
             else:
                 last_result = self._build_result(response)

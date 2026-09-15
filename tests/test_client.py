@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import urllib.error
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -91,6 +93,21 @@ class TestLazyClient:
             assert first is second
             mock_factory.assert_called_once()
 
+    def test_suppresses_python_http_client_debug_logging(self) -> None:
+        """python_http_client logs the API key in headers at DEBUG — must not leak."""
+        from altissimo.sendgrid.client import _get_sendgrid_api_client
+
+        target_logger = logging.getLogger("python_http_client")
+        original_level = target_logger.level
+        target_logger.setLevel(logging.DEBUG)
+        try:
+            with patch("sendgrid.SendGridAPIClient") as mock_sdk_client:
+                mock_sdk_client.return_value = MagicMock()
+                _get_sendgrid_api_client("SG.test-key")
+            assert target_logger.level == logging.WARNING
+        finally:
+            target_logger.setLevel(original_level)
+
 
 class TestResolveFrom:
     def test_explicit_from(self) -> None:
@@ -142,14 +159,18 @@ class TestSendText:
         assert result.ok is True
 
     def test_send_text_api_error_raises_by_default(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
-        fake_api_client.send.side_effect = Exception("API down")
+        exc = Exception("API down")
+        exc.status_code = 500  # type: ignore[attr-defined]
+        fake_api_client.send.side_effect = exc
         with pytest.raises(SendGridSendError):
             client_with_mock.send_text(to="user@example.com", subject="Hello", body="Hi")
 
     def test_send_text_api_error_swallowed_when_opted_out(
         self, client_no_raise: Any, fake_api_client: MagicMock
     ) -> None:
-        fake_api_client.send.side_effect = Exception("API down")
+        exc = Exception("API down")
+        exc.status_code = 500  # type: ignore[attr-defined]
+        fake_api_client.send.side_effect = exc
         result = client_no_raise.send_text(to="user@example.com", subject="Hello", body="Hi")
         assert result.ok is False
         assert result.error == "API down"
@@ -171,14 +192,14 @@ class TestSendHtml:
         assert result.ok is True
 
     def test_send_html_api_error_raises_by_default(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
-        fake_api_client.send.side_effect = RuntimeError("timeout")
+        fake_api_client.send.side_effect = TimeoutError("timeout")
         with pytest.raises(SendGridSendError):
             client_with_mock.send_html(to="user@example.com", subject="Hello", html="<h1>Hi</h1>")
 
     def test_send_html_api_error_swallowed_when_opted_out(
         self, client_no_raise: Any, fake_api_client: MagicMock
     ) -> None:
-        fake_api_client.send.side_effect = RuntimeError("timeout")
+        fake_api_client.send.side_effect = TimeoutError("timeout")
         result = client_no_raise.send_html(to="user@example.com", subject="Hello", html="<h1>Hi</h1>")
         assert result.ok is False
         assert result.error == "timeout"
@@ -208,7 +229,9 @@ class TestSendTemplate:
         assert result.ok is True
 
     def test_send_template_api_error_raises_by_default(self, client_with_mock: Any, fake_api_client: MagicMock) -> None:
-        fake_api_client.send.side_effect = Exception("bad request")
+        exc = Exception("bad request")
+        exc.status_code = 400  # type: ignore[attr-defined]
+        fake_api_client.send.side_effect = exc
         with pytest.raises(SendGridSendError):
             client_with_mock.send_template(
                 to="user@example.com",
@@ -219,7 +242,9 @@ class TestSendTemplate:
     def test_send_template_api_error_swallowed_when_opted_out(
         self, client_no_raise: Any, fake_api_client: MagicMock
     ) -> None:
-        fake_api_client.send.side_effect = Exception("bad request")
+        exc = Exception("bad request")
+        exc.status_code = 400  # type: ignore[attr-defined]
+        fake_api_client.send.side_effect = exc
         result = client_no_raise.send_template(
             to="user@example.com",
             template_id="d-abc123",
@@ -268,12 +293,21 @@ class TestBuildErrorResult:
         result = sg._build_error_result(exc)
         assert result.status_code == 400
 
-    def test_reads_code_attribute_as_fallback(self) -> None:
+    def test_reads_code_from_urllib_http_error_as_fallback(self) -> None:
+        import urllib.error
+
         sg = SendGridClient(api_key="SG.test")
-        exc = Exception("rate limited")
-        exc.code = 429  # type: ignore[attr-defined]
+        exc = urllib.error.HTTPError(url="https://api.sendgrid.com", code=429, msg="rate limited", hdrs=None, fp=None)
         result = sg._build_error_result(exc)
         assert result.status_code == 429
+
+    def test_ignores_code_attribute_on_non_urllib_exception(self) -> None:
+        """A `.code` attribute on an arbitrary exception must not be trusted as an HTTP status."""
+        sg = SendGridClient(api_key="SG.test")
+        exc = Exception("unrelated")
+        exc.code = 429  # type: ignore[attr-defined]
+        result = sg._build_error_result(exc)
+        assert result.status_code == 0
 
     def test_status_code_defaults_to_zero(self) -> None:
         sg = SendGridClient(api_key="SG.test")
@@ -592,6 +626,100 @@ class TestRetryBehavior:
         assert fake_api_client.send.call_count == 2
 
 
+class TestConfigAndProgrammingErrorsNotRetried:
+    """Config/import errors and programming errors must surface immediately, unretried.
+
+    Regression tests for the case where ``from_env()``'s deferred key
+    resolution ran *inside* the retry loop's ``try`` block: a missing API
+    key or an uninstalled SDK was caught, given ``status_code=0``, and
+    treated as a retryable network error instead of propagating as the
+    ``ValueError`` / ``SendGridImportError`` it actually is.
+    """
+
+    def test_missing_api_key_raises_immediately_without_retry(self, fake_api_client: MagicMock) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            sg = SendGridClient.from_env(default_from="sender@example.com", max_retries=2, retry_delay=0.1)
+            with patch.object(sg, "_backoff") as mock_backoff, pytest.raises(ValueError, match="not set"):
+                sg.send_template(to="a@example.com", template_id="d-1")
+            mock_backoff.assert_not_called()
+            fake_api_client.send.assert_not_called()
+
+    def test_missing_sendgrid_sdk_raises_immediately_without_retry(self) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", max_retries=2, retry_delay=0.1)
+        with (
+            patch.dict("sys.modules", {"sendgrid": None}),
+            patch.object(sg, "_backoff") as mock_backoff,
+            pytest.raises(SendGridImportError),
+        ):
+            sg.send_template(to="a@example.com", template_id="d-1")
+        mock_backoff.assert_not_called()
+
+    def test_programming_error_propagates_unretried_and_unwrapped(self, fake_api_client: MagicMock) -> None:
+        """A bug in the SDK call (e.g. malformed payload) is not a send failure."""
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", max_retries=2, retry_delay=0.1)
+        sg._client = fake_api_client
+        fake_api_client.send.side_effect = TypeError("bad payload")
+
+        with patch.object(sg, "_backoff") as mock_backoff, pytest.raises(TypeError, match="bad payload"):
+            sg.send_template(to="a@example.com", template_id="d-1")
+        mock_backoff.assert_not_called()
+        fake_api_client.send.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionError("connection reset"),
+            TimeoutError("timed out"),
+            urllib.error.URLError("dns failure"),
+        ],
+        ids=["ConnectionError", "TimeoutError", "URLError"],
+    )
+    def test_transport_errors_are_retried(self, fake_api_client: MagicMock, exc: Exception) -> None:
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", max_retries=2, retry_delay=0.1)
+        sg._client = fake_api_client
+        fake_api_client.send.side_effect = [exc, FakeResponse(status_code=202)]
+
+        with patch.object(sg, "_backoff"):
+            result = sg.send_template(to="a@example.com", template_id="d-1")
+        assert result.ok is True
+        assert fake_api_client.send.call_count == 2
+
+    def test_real_http_error_with_permanent_status_not_retried(self, fake_api_client: MagicMock) -> None:
+        from python_http_client.exceptions import BadRequestsError
+
+        sg = SendGridClient(
+            api_key="SG.test",
+            default_from="sender@example.com",
+            max_retries=2,
+            retry_delay=0.1,
+            raise_on_error=False,
+        )
+        sg._client = fake_api_client
+        fake_api_client.send.side_effect = BadRequestsError(400, "Bad Request", b"bad payload", {})
+
+        with patch.object(sg, "_backoff") as mock_backoff:
+            result = sg.send_template(to="a@example.com", template_id="d-1")
+        assert result.ok is False
+        assert result.status_code == 400
+        mock_backoff.assert_not_called()
+        fake_api_client.send.assert_called_once()
+
+    def test_real_http_error_with_transient_status_is_retried(self, fake_api_client: MagicMock) -> None:
+        from python_http_client.exceptions import ServiceUnavailableError
+
+        sg = SendGridClient(api_key="SG.test", default_from="sender@example.com", max_retries=2, retry_delay=0.1)
+        sg._client = fake_api_client
+        fake_api_client.send.side_effect = [
+            ServiceUnavailableError(503, "Service Unavailable", b"try again", {}),
+            FakeResponse(status_code=202),
+        ]
+
+        with patch.object(sg, "_backoff"):
+            result = sg.send_template(to="a@example.com", template_id="d-1")
+        assert result.ok is True
+        assert fake_api_client.send.call_count == 2
+
+
 class TestBackoff:
     def test_backoff_calls_sleep(self) -> None:
         sg = SendGridClient(api_key="SG.test", retry_delay=1.0)
@@ -897,7 +1025,9 @@ class TestSuccessLogging:
         assert "d-abc123" in str(mock_logger.info.call_args)
 
     def test_no_success_log_on_failure(self, client_no_raise: Any, fake_api_client: MagicMock) -> None:
-        fake_api_client.send.side_effect = Exception("fail")
+        exc = Exception("fail")
+        exc.status_code = 500  # type: ignore[attr-defined]
+        fake_api_client.send.side_effect = exc
         with patch("altissimo.sendgrid.client.logger") as mock_logger:
             result = client_no_raise.send_text(to="user@example.com", subject="Hi", body="Hello")
         assert result.ok is False
