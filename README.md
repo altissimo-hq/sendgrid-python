@@ -66,11 +66,11 @@ assert result.status_code == 202
 
 | Method | Description |
 |---|---|
-| `SendGridClient(api_key, default_from?)` | Create a client with an explicit API key |
-| `SendGridClient.from_env(env_var?, default_from?)` | Create a client from an environment variable |
-| `send_text(to, subject, body, from_email?, reply_to?)` | Send a plain-text email |
-| `send_html(to, subject, html, from_email?, reply_to?)` | Send an HTML email |
-| `send_template(to, template_id, dynamic_data?, from_email?, reply_to?)` | Send a dynamic template email |
+| `SendGridClient(api_key, default_from?, max_retries?, retry_delay?, sandbox_mode?)` | Create a client with an explicit API key |
+| `SendGridClient.from_env(env_var?, default_from?, max_retries?, retry_delay?, sandbox_mode?)` | Create a client from an environment variable |
+| `send_text(to, subject, body, from_email?, reply_to?, cc?, bcc?, sandbox?)` | Send a plain-text email |
+| `send_html(to, subject, html, from_email?, reply_to?, cc?, bcc?, sandbox?)` | Send an HTML email |
+| `send_template(to, template_id, dynamic_data?, from_email?, reply_to?, cc?, bcc?, sandbox?)` | Send a dynamic template email |
 
 ### `SendResult`
 
@@ -89,7 +89,7 @@ altissimo.sendgrid
 ├── __init__.py       # Public API surface
 ├── client.py         # SendGridClient with lazy SDK initialization
 ├── exceptions.py     # SendGridError, SendGridImportError
-├── models.py         # SendResult dataclass
+├── models.py         # SendResult and EmailAddress dataclasses
 └── py.typed          # PEP 561 marker
 ```
 

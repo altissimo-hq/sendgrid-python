@@ -51,7 +51,8 @@ class SendGridClient:
     plain-text, HTML, and dynamic template emails.
 
     The underlying ``SendGridAPIClient`` is lazily initialized on the first
-    send call, so constructing a ``SendGridClient`` is side-effect-free.
+    send call, so constructing a ``SendGridClient`` — via either the
+    constructor or :meth:`from_env` — is side-effect-free.
 
     Args:
         api_key: SendGrid API key.
@@ -74,7 +75,17 @@ class SendGridClient:
         retry_delay: float = 1.0,
         sandbox_mode: bool = False,
     ) -> None:
-        self._api_key = api_key
+        self._init_common(default_from, max_retries, retry_delay, sandbox_mode)
+        self._api_key: str | None = api_key
+        self._api_key_env_var: str | None = None
+
+    def _init_common(
+        self,
+        default_from: EmailAddressLike | None,
+        max_retries: int,
+        retry_delay: float,
+        sandbox_mode: bool,
+    ) -> None:
         self._default_from = default_from
         self._max_retries = max_retries
         self._retry_delay = retry_delay
@@ -91,7 +102,11 @@ class SendGridClient:
         retry_delay: float = 1.0,
         sandbox_mode: bool | None = None,
     ) -> SendGridClient:
-        """Create a client using an API key from an environment variable.
+        """Create a client that reads its API key from an environment variable.
+
+        The environment variable is not read until the API key is actually
+        needed (the first send call, or access to :attr:`client`) — this
+        factory is just as side-effect-free as the regular constructor.
 
         Args:
             env_var: Name of the environment variable containing the API key.
@@ -103,27 +118,39 @@ class SendGridClient:
                 (truthy values: ``1``, ``true``, ``yes``).
 
         Raises:
-            ValueError: If the environment variable is not set.
+            ValueError: If the environment variable is not set or is empty,
+                raised lazily on first use rather than from this call.
         """
-        api_key = os.environ.get(env_var)
+        if sandbox_mode is None:
+            sandbox_mode = os.environ.get("SENDGRID_SANDBOX_MODE", "").lower() in ("1", "true", "yes")
+        instance = cls.__new__(cls)
+        instance._init_common(default_from, max_retries, retry_delay, sandbox_mode)
+        instance._api_key = None
+        instance._api_key_env_var = env_var
+        return instance
+
+    def _resolve_api_key(self) -> str:
+        """Return the API key, reading it from the environment on first use.
+
+        Raises:
+            ValueError: If the client was built via :meth:`from_env` and the
+                configured environment variable is not set or is empty.
+        """
+        if self._api_key is not None:
+            return self._api_key
+        env_var = self._api_key_env_var
+        api_key = os.environ.get(env_var) if env_var else None
         if not api_key:
             msg = f"Environment variable '{env_var}' is not set or is empty."
             raise ValueError(msg)
-        if sandbox_mode is None:
-            sandbox_mode = os.environ.get("SENDGRID_SANDBOX_MODE", "").lower() in ("1", "true", "yes")
-        return cls(
-            api_key=api_key,
-            default_from=default_from,
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-            sandbox_mode=sandbox_mode,
-        )
+        self._api_key = api_key
+        return api_key
 
     @property
     def client(self) -> SendGridAPIClient:
         """Return the lazily-initialized ``SendGridAPIClient``."""
         if self._client is None:
-            self._client = _get_sendgrid_api_client(self._api_key)
+            self._client = _get_sendgrid_api_client(self._resolve_api_key())
         return self._client
 
     # ------------------------------------------------------------------

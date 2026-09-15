@@ -25,23 +25,48 @@ class TestClientConstruction:
         client = SendGridClient(api_key="SG.test-key", default_from="me@example.com")
         assert client._default_from == "me@example.com"
 
+    def test_from_env_does_not_read_env_var_eagerly(self) -> None:
+        """Constructing via from_env() must not touch the environment at all."""
+        with patch.dict(os.environ, {}, clear=True):
+            client = SendGridClient.from_env(env_var="SENDGRID_API_KEY")
+        assert client._api_key is None
+        assert client._api_key_env_var == "SENDGRID_API_KEY"
+
     def test_from_env(self) -> None:
         with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.from-env"}):
             client = SendGridClient.from_env()
-            assert client._api_key == "SG.from-env"
+            assert client._resolve_api_key() == "SG.from-env"
 
     def test_from_env_custom_var(self) -> None:
         with patch.dict(os.environ, {"MY_SG_KEY": "SG.custom"}):
             client = SendGridClient.from_env(env_var="MY_SG_KEY")
-            assert client._api_key == "SG.custom"
+            assert client._resolve_api_key() == "SG.custom"
 
-    def test_from_env_missing(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), pytest.raises(ValueError, match="not set"):
-            SendGridClient.from_env(env_var="NONEXISTENT_KEY")
+    def test_from_env_missing_does_not_raise_at_construction(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            client = SendGridClient.from_env(env_var="NONEXISTENT_KEY")
+        assert client is not None
 
-    def test_from_env_empty(self) -> None:
-        with patch.dict(os.environ, {"SENDGRID_API_KEY": ""}), pytest.raises(ValueError, match="not set"):
-            SendGridClient.from_env()
+    def test_from_env_missing_raises_lazily_on_first_use(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            client = SendGridClient.from_env(env_var="NONEXISTENT_KEY")
+            with pytest.raises(ValueError, match="not set"):
+                client._resolve_api_key()
+            with pytest.raises(ValueError, match="not set"):
+                _ = client.client
+
+    def test_from_env_empty_raises_lazily_on_first_use(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_API_KEY": ""}):
+            client = SendGridClient.from_env()
+            with pytest.raises(ValueError, match="not set"):
+                client._resolve_api_key()
+
+    def test_from_env_reads_env_var_set_after_construction(self) -> None:
+        """The env var is read at first-use time, not construction time."""
+        with patch.dict(os.environ, {}, clear=True):
+            client = SendGridClient.from_env()
+            os.environ["SENDGRID_API_KEY"] = "SG.set-later"
+            assert client._resolve_api_key() == "SG.set-later"
 
     def test_from_env_with_default_from(self) -> None:
         with patch.dict(os.environ, {"SENDGRID_API_KEY": "SG.test"}):
