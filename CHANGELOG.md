@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-09-28
+
+First release published to PyPI, as `altissimo-sendgrid`. The import name is
+unchanged (`altissimo.sendgrid`). No library code changed since 0.2.1.
+
+### Added
+
+- A publish workflow: tagged releases (`v*`) are tested, checked against the
+  package version, built, and uploaded to PyPI through Trusted Publishing
+  (environment `pypi`). Running it by hand uploads the current branch to
+  TestPyPI (environment `testpypi`).
+- Renovate configuration: a monthly grouped PR for minor/patch updates, monthly
+  `poetry.lock` maintenance, and security fixes at any time. This replaces
+  Dependabot security-update PRs.
+
+### Changed
+
+- The build requires `poetry-core>=2.2`, and CI uses Poetry 2.4.1.
+- Dropped the License trove classifier (superseded by the SPDX `license`
+  expression) and the redundant `[tool.poetry] name`.
+
 ## [0.2.1] - 2026-09-15
 
 ### Fixed

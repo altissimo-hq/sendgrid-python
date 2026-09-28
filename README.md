@@ -25,8 +25,11 @@ Reusable SendGrid email client for Altissimo Python projects.
 
 ## Installation
 
+Published on PyPI as [`altissimo-sendgrid`](https://pypi.org/project/altissimo-sendgrid/);
+the import name is `altissimo.sendgrid`.
+
 ```bash
-pip install altissimo-sendgrid[sendgrid]   # core + SendGrid SDK
+pip install "altissimo-sendgrid[sendgrid]"   # core + SendGrid SDK
 ```
 
 ## Quick Start

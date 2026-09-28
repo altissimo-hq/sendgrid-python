@@ -11,7 +11,7 @@ from .models import EmailAddress, SendResult
 try:
     __version__ = version("altissimo-sendgrid")
 except PackageNotFoundError:
-    __version__ = "0.2.1"
+    __version__ = "0.2.2"
 
 __all__ = [
     "EmailAddress",
